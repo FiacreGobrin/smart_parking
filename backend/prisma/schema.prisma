@@ -1,0 +1,664 @@
+// Smart Parking Management System - database schema (Neon PostgreSQL)
+// Partial unique indexes, the reservation exclusion constraint and the audit-log
+// immutability trigger live in migrations/*_constraints/migration.sql (Prisma cannot express them).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")        // Neon pooled connection (app traffic)
+  directUrl = env("DIRECT_DATABASE_URL") // Neon direct connection (migrations)
+}
+
+enum Role {
+  USER
+  SUPER_ADMIN
+  PARKING_ADMIN
+  ATTENDANT
+  FINANCE_OFFICER
+  VIEWER
+}
+
+enum UserStatus {
+  PENDING
+  ACTIVE
+  BLOCKED
+}
+
+enum ServiceType {
+  PARKING
+  GARAGE
+  CAR_WASH
+}
+
+enum BillingUnit {
+  HOUR
+  DAY
+  WEEK
+  MONTH
+  VISIT
+}
+
+enum SpaceType {
+  STANDARD
+  MOTORCYCLE
+  ACCESSIBLE
+  EV
+  RESERVED
+  VIP
+}
+
+enum SpaceStatus {
+  AVAILABLE
+  OCCUPIED
+  RESERVED
+  OUT_OF_SERVICE
+}
+
+enum VehicleType {
+  CAR
+  MOTORCYCLE
+  BUS
+  TRUCK
+  OTHER
+}
+
+enum VehicleStatus {
+  REGISTERED
+  AUTHORIZED
+  RESTRICTED
+}
+
+enum GateDirection {
+  ENTRY
+  EXIT
+}
+
+enum DeviceStatus {
+  ONLINE
+  OFFLINE
+  MAINTENANCE
+  ERROR
+}
+
+enum GateEventType {
+  ENTRY
+  EXIT
+  COMMAND
+  DENIED
+  ERROR
+}
+
+enum GateOutcome {
+  GRANTED
+  DENIED
+  ACKNOWLEDGED
+  FAILED
+}
+
+enum SessionStatus {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum PaymentMethod {
+  CASH
+  MOBILE_MONEY
+  CARD
+  BANK
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  REFUNDED
+}
+
+enum ReservationStatus {
+  PENDING
+  CONFIRMED
+  CHECKED_IN
+  CANCELLED
+  EXPIRED
+  NO_SHOW
+}
+
+enum PermitStatus {
+  ACTIVE
+  EXPIRED
+  SUSPENDED
+  CANCELLED
+}
+
+enum NotificationType {
+  LOW_AVAILABILITY
+  PAYMENT_FAILED
+  DEVICE_OFFLINE
+  UNUSUAL_ACCESS
+  RECOGNITION_FAILED
+  EXPIRING_RESERVATION
+  EXPIRING_PERMIT
+  SYSTEM_ERROR
+  INFO
+}
+
+enum Severity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+enum RecognitionStatus {
+  RECOGNIZED
+  PENDING_CONFIRMATION
+  CONFIRMED
+  CORRECTED
+  FAILED
+  DUPLICATE
+}
+
+model User {
+  id           String    @id @default(cuid())
+  username     String    @unique
+  email        String?   @unique
+  name         String
+  phone        String?   @unique // normalized +2507XXXXXXXX
+  nationalId   String?   @unique // 16 digits
+  passwordHash String
+  role         Role
+  status       UserStatus @default(ACTIVE)
+  activationCodeHash String? // one-time code the user must enter at first sign-in
+  facilityId   String? // null = access to all facilities (super admin / finance)
+  facility     ParkingFacility? @relation(fields: [facilityId], references: [id])
+  failedLogins Int       @default(0)
+  lockedUntil  DateTime?
+  resetTokenHash String?
+  resetExpiresAt DateTime?
+  mustChangePassword Boolean @default(false)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  archivedAt   DateTime?
+
+  refreshTokens RefreshToken[]
+  loginHistory  LoginHistory[]
+  reads         NotificationRead[]
+
+  @@index([role])
+  @@index([status])
+  @@index([facilityId])
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  userAgent String?
+  ip        String?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model LoginHistory {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  email     String
+  success   Boolean
+  reason    String?
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([email])
+}
+
+model ParkingFacility {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  name        String
+  address     String?
+  city        String?
+  timezone    String   @default("Africa/Kigali")
+  currency    String   @default("RWF")
+  taxRate     Decimal  @default(0) @db.Decimal(5, 2) // percent, e.g. 18.00 for VAT
+  lowAvailabilityThreshold Int @default(10) // percent of free spaces that triggers an alert
+  allowUnassignedSpace Boolean @default(false) // entry allowed without a numbered space
+  isActive    Boolean  @default(true)
+  archivedAt  DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  users        User[]
+  zones        ParkingZone[]
+  spaces       ParkingSpace[]
+  cameras      Camera[]
+  gates        Gate[]
+  sessions     ParkingSession[]
+  rates        ParkingRate[]
+  reservations Reservation[]
+  permits      ParkingPermit[]
+  recognitions RecognitionEvent[]
+  notifications Notification[]
+}
+
+model ParkingZone {
+  id         String   @id @default(cuid())
+  facilityId String
+  facility   ParkingFacility @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+  name       String
+  floor      String? // e.g. "B1", "Ground"
+  section    String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  spaces ParkingSpace[]
+
+  @@unique([facilityId, name])
+}
+
+model ParkingSpace {
+  id         String      @id @default(cuid())
+  facilityId String
+  facility   ParkingFacility @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+  zoneId     String?
+  zone       ParkingZone? @relation(fields: [zoneId], references: [id], onDelete: SetNull)
+  code       String
+  type       SpaceType   @default(STANDARD)
+  status     SpaceStatus @default(AVAILABLE)
+  notes      String?
+  archivedAt DateTime?
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  sessions     ParkingSession[]
+  reservations Reservation[]
+  history      SpaceStatusHistory[]
+
+  @@unique([facilityId, code])
+  @@index([facilityId, status])
+  @@index([zoneId])
+}
+
+model SpaceStatusHistory {
+  id        String      @id @default(cuid())
+  spaceId   String
+  space     ParkingSpace @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  fromStatus SpaceStatus?
+  toStatus  SpaceStatus
+  reason    String?
+  sessionId String?
+  createdAt DateTime    @default(now())
+
+  @@index([spaceId, createdAt])
+}
+
+model VehicleOwner {
+  id        String   @id @default(cuid())
+  name      String
+  phone     String?
+  email     String?
+  nationalId String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  vehicles Vehicle[]
+}
+
+model Vehicle {
+  id         String        @id @default(cuid())
+  plate      String        @unique // normalized: upper-case, alphanumeric only
+  plateDisplay String? // as typed by the operator
+  type       VehicleType   @default(CAR)
+  make       String?
+  model      String?
+  color      String?
+  status     VehicleStatus @default(REGISTERED)
+  restrictionReason String?
+  imagePath  String?
+  ownerId    String?
+  owner      VehicleOwner? @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+  archivedAt DateTime?
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  sessions ParkingSession[]
+  permits  ParkingPermit[]
+
+  @@index([status])
+  @@index([ownerId])
+}
+
+model Camera {
+  id         String       @id @default(cuid())
+  facilityId String
+  facility   ParkingFacility @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+  gateId     String?
+  gate       Gate?        @relation(fields: [gateId], references: [id], onDelete: SetNull)
+  name       String
+  streamUrl  String?
+  status     DeviceStatus @default(ONLINE)
+  isSimulated Boolean     @default(true)
+  lastSeenAt DateTime?
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+
+  recognitions RecognitionEvent[]
+
+  @@unique([facilityId, name])
+}
+
+model Gate {
+  id             String        @id @default(cuid())
+  facilityId     String
+  facility       ParkingFacility @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+  name           String
+  direction      GateDirection
+  status         DeviceStatus  @default(ONLINE)
+  controllerType String        @default("SIMULATION") // SIMULATION | HTTP
+  controllerUrl  String?
+  lastHeartbeatAt DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  cameras      Camera[]
+  events       GateEvent[]
+  recognitions RecognitionEvent[]
+
+  @@unique([facilityId, name])
+}
+
+model GateEvent {
+  id        String        @id @default(cuid())
+  gateId    String
+  gate      Gate          @relation(fields: [gateId], references: [id], onDelete: Cascade)
+  type      GateEventType
+  outcome   GateOutcome
+  plate     String?
+  vehicleId String?
+  sessionId String?
+  cameraId  String?
+  userId    String?
+  reason    String?
+  details   Json?
+  createdAt DateTime      @default(now())
+
+  @@index([gateId, createdAt])
+  @@index([plate])
+  @@index([createdAt])
+}
+
+model ParkingRate {
+  id          String   @id @default(cuid())
+  name        String
+  service     ServiceType @default(PARKING)
+  facilityId  String? // null = applies to every facility
+  facility    ParkingFacility? @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+  vehicleType VehicleType? // null = every vehicle type
+  unit        BillingUnit @default(HOUR)
+  startPrice  Decimal  @default(100) @db.Decimal(12, 2) // price of the first unit (minimum 100)
+  increment   Decimal  @default(0) @db.Decimal(12, 2) // added for each further unit started
+  cap         Decimal? @db.Decimal(12, 2) // maximum (per day for hourly rates)
+  isActive    Boolean  @default(true)
+  validFrom   DateTime? // "effective from"
+  validTo     DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([facilityId, vehicleType, isActive])
+  @@index([service, unit])
+}
+
+model ParkingSession {
+  id         String        @id @default(cuid())
+  ticketNo   String        @unique
+  plate      String
+  vehicleId  String?
+  vehicle    Vehicle?      @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  vehicleType VehicleType  @default(CAR)
+  service    ServiceType   @default(PARKING)
+  billingUnit BillingUnit  @default(HOUR)
+  facilityId String
+  facility   ParkingFacility @relation(fields: [facilityId], references: [id])
+  spaceId    String?
+  space      ParkingSpace? @relation(fields: [spaceId], references: [id], onDelete: SetNull)
+  status     SessionStatus @default(ACTIVE)
+  entryAt    DateTime      @default(now())
+  exitAt     DateTime?
+  entryGateId String?
+  exitGateId  String?
+  entryRecognitionId String?
+  exitRecognitionId  String?
+  enteredById String?
+  exitedById  String?
+  durationMinutes Int?
+  rateId      String?
+  subtotal    Decimal      @default(0) @db.Decimal(12, 2)
+  discount    Decimal      @default(0) @db.Decimal(12, 2)
+  tax         Decimal      @default(0) @db.Decimal(12, 2)
+  total       Decimal      @default(0) @db.Decimal(12, 2)
+  amountPaid  Decimal      @default(0) @db.Decimal(12, 2)
+  exemptReason String?
+  breakdown   Json?
+  notes       String?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  payments Payment[]
+  reservation Reservation?
+
+  @@index([plate])
+  @@index([facilityId, status])
+  @@index([entryAt])
+  @@index([exitAt])
+  @@index([vehicleId])
+}
+
+model Payment {
+  id            String        @id @default(cuid())
+  reference     String        @unique
+  idempotencyKey String?      @unique
+  sessionId     String?
+  session       ParkingSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  permitId      String?
+  permit        ParkingPermit? @relation(fields: [permitId], references: [id], onDelete: SetNull)
+  facilityId    String?
+  amount        Decimal       @db.Decimal(12, 2)
+  currency      String        @default("RWF")
+  method        PaymentMethod
+  status        PaymentStatus @default(PENDING)
+  provider      String? // cash | momo-sim | <real provider key>
+  providerReference String?   @unique
+  payerPhone    String?
+  receivedById  String?
+  failureReason String?
+  paidAt        DateTime?
+  refundedAt    DateTime?
+  refundReason  String?
+  refundedById  String?
+  reconciledAt  DateTime?
+  reconciledById String?
+  isSimulated   Boolean       @default(false)
+  metadata      Json?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  receipt Receipt?
+
+  @@index([status, createdAt])
+  @@index([sessionId])
+  @@index([facilityId, createdAt])
+}
+
+model Receipt {
+  id        String   @id @default(cuid())
+  number    String   @unique
+  paymentId String   @unique
+  payment   Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  snapshot  Json
+  issuedAt  DateTime @default(now())
+}
+
+model WebhookEvent {
+  id          String   @id @default(cuid())
+  provider    String
+  eventId     String
+  payload     Json
+  processedAt DateTime @default(now())
+
+  @@unique([provider, eventId])
+}
+
+model Reservation {
+  id         String            @id @default(cuid())
+  code       String            @unique
+  facilityId String
+  facility   ParkingFacility   @relation(fields: [facilityId], references: [id])
+  spaceId    String
+  space      ParkingSpace      @relation(fields: [spaceId], references: [id])
+  plate      String
+  customerName String
+  phone      String?
+  startAt    DateTime
+  endAt      DateTime
+  status     ReservationStatus @default(CONFIRMED)
+  sessionId  String?           @unique
+  session    ParkingSession?   @relation(fields: [sessionId], references: [id])
+  notes      String?
+  createdById String?
+  cancelledReason String?
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+
+  @@index([spaceId, startAt, endAt])
+  @@index([plate])
+  @@index([status])
+}
+
+model ParkingPermit {
+  id         String       @id @default(cuid())
+  number     String       @unique
+  facilityId String
+  facility   ParkingFacility @relation(fields: [facilityId], references: [id])
+  plate      String
+  vehicleId  String?
+  vehicle    Vehicle?     @relation(fields: [vehicleId], references: [id], onDelete: SetNull)
+  holderName String
+  phone      String?
+  startsAt   DateTime
+  endsAt     DateTime
+  status     PermitStatus @default(ACTIVE)
+  fee        Decimal      @default(0) @db.Decimal(12, 2)
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+
+  payments Payment[]
+
+  @@index([plate, status])
+  @@index([endsAt])
+}
+
+model RecognitionEvent {
+  id         String            @id @default(cuid())
+  facilityId String?
+  facility   ParkingFacility?  @relation(fields: [facilityId], references: [id], onDelete: SetNull)
+  cameraId   String?
+  camera     Camera?           @relation(fields: [cameraId], references: [id], onDelete: SetNull)
+  gateId     String?
+  gate       Gate?             @relation(fields: [gateId], references: [id], onDelete: SetNull)
+  imagePath  String?
+  imageData  Bytes?   @db.ByteA // the photo itself
+  imageMime  String?
+  rawPlate   String?
+  plate      String? // normalized, after any correction
+  confidence Float?
+  status     RecognitionStatus
+  engine     String // simulation | ocr | http
+  isSimulated Boolean          @default(false)
+  matchedVehicleId String?
+  matchedSessionId String?
+  confirmedById String?
+  error      String?
+  createdAt  DateTime          @default(now())
+
+  @@index([plate, createdAt])
+  @@index([cameraId, createdAt])
+  @@index([status])
+}
+
+model Notification {
+  id         String           @id @default(cuid())
+  type       NotificationType
+  severity   Severity         @default(INFO)
+  title      String
+  message    String
+  facilityId String?
+  facility   ParkingFacility? @relation(fields: [facilityId], references: [id], onDelete: SetNull)
+  dedupeKey  String? // suppresses repeats of the same open alert
+  metadata   Json?
+  createdAt  DateTime         @default(now())
+
+  reads NotificationRead[]
+
+  @@index([createdAt])
+  @@index([dedupeKey])
+}
+
+model NotificationRead {
+  userId         String
+  notificationId String
+  readAt         DateTime     @default(now())
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  notification   Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+
+  @@id([userId, notificationId])
+}
+
+// Append-only. A database trigger (see constraints migration) rejects UPDATE and DELETE.
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  actorEmail String?
+  action     String
+  entity     String?
+  entityId   String?
+  result     String   @default("SUCCESS")
+  ip         String?
+  requestId  String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([actorId, createdAt])
+  @@index([entity, entityId])
+  @@index([action])
+}
+
+model SystemSetting {
+  key         String   @id
+  value       Json
+  description String?
+  updatedById String?
+  updatedAt   DateTime @updatedAt
+}
+
+// Outgoing SMS. Until an SMS gateway is connected every message is stored with status SIMULATED.
+model SmsMessage {
+  id        String   @id @default(cuid())
+  toPhone   String
+  body      String
+  status    String   @default("SIMULATED")
+  userId    String?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}

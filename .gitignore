@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.*
+!.env.example
+backend/uploads/
+backend/uploads-test/
+backend/.localdb/
+frontend/dist/
+*.log
+backend/.tessdata/
+backend/uploads/
+.claude/

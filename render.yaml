@@ -1,0 +1,26 @@
+# Render blueprint for the API. The frontend deploys to Vercel (frontend/vercel.json).
+# Secrets marked sync:false are entered in the Render dashboard, never committed.
+services:
+  - type: web
+    name: smart-parking-api
+    runtime: node
+    rootDir: backend
+    plan: starter
+    buildCommand: npm ci && npx prisma generate
+    # Applies pending migrations before each start. Uses DIRECT_DATABASE_URL (Neon non-pooled).
+    preDeployCommand: npx prisma migrate deploy
+    startCommand: node src/server.js
+    healthCheckPath: /api/v1/health
+    envVars:
+      - { key: NODE_ENV, value: production }
+      - { key: DATABASE_URL, sync: false }          # Neon pooled URL (-pooler host)
+      - { key: DIRECT_DATABASE_URL, sync: false }   # Neon direct URL
+      - { key: JWT_SECRET, generateValue: true }
+      - { key: FRONTEND_URL, sync: false }          # e.g. https://smart-parking.vercel.app
+      - { key: ANPR_MODE, value: simulation }
+      - { key: PAYMENT_MODE, value: simulation }
+      - { key: UPLOAD_DIR, value: /var/data/uploads }
+    disk:
+      name: uploads
+      mountPath: /var/data
+      sizeGB: 5
